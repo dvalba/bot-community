@@ -37,7 +37,37 @@ SOCIOS_DEMO = [
     ("juan", "Juan Pérez", 30.0),
 ]
 
+
+def crear_tablas(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS socios (
+            socio_id TEXT PRIMARY KEY,
+            telegram_id INTEGER,
+            nombre TEXT,
+            porcentaje REAL DEFAULT 30.0,
+            activo INTEGER DEFAULT 1,
+            creado TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS secciones (
+            clave TEXT PRIMARY KEY,
+            titulo TEXT NOT NULL,
+            contenido TEXT NOT NULL,
+            orden INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS usuarios (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            socio_id TEXT,
+            estado TEXT DEFAULT 'nuevo',
+            id_plataforma TEXT,
+            fecha_registro TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+
 with sqlite3.connect(DB) as conn:
+    crear_tablas(conn)
+
     for clave, titulo, contenido, orden in SECCIONES:
         conn.execute("""
             INSERT INTO secciones (clave, titulo, contenido, orden)
