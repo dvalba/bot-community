@@ -1,69 +1,85 @@
+import asyncio
+import html
 import os
 import sqlite3
-from aiogram import Bot, Dispatcher, F
+
+from dotenv import load_dotenv
+
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
-# 1. Cargar el token de forma segura desde las variables de entorno
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Cargar .env (override=True para que el .env gane sobre variables ya exportadas)
+load_dotenv(override=True)
 
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-    raise ValueError("No se encontró el TELEGRAM_TOKEN en las variables de entorno.")
+    raise ValueError("No se encontró TELEGRAM_TOKEN en el entorno ni en .env")
+
+DB_PATH = "comunidad.db"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# 2. Inicializar la base de datos local SQLite
-def init_db():
-    conn = sqlite3.connect("comunidad.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            socio TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
 
-# 3. Manejador para el comando /start con soporte para sub-afiliados (ej: /start socio_juan)
+def init_db() -> None:
+    """Crea la tabla si no existe."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                socio TEXT
+            )
+        """)
+
+
+def guardar_usuario(user_id: int, username: str, socio: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO usuarios (user_id, username, socio)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                socio = excluded.socio
+        """, (user_id, username, socio))
+
+
+def obtener_reporte() -> list[tuple[str, int]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "SELECT socio, COUNT(*) FROM usuarios GROUP BY socio ORDER BY COUNT(*) DESC"
+        )
+        return cursor.fetchall()
+
+
 @dp.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message) -> None:
     user_id = message.from_user.id
     username = message.from_user.username or "Sin username"
-    
-    # Extraer el argumento que viene después de /start (el socio/afiliado)
-    args = message.text.split(maxsplit=1)
-    socio = args[1] if len(args) > 1 else "ninguno"
 
-    # Guardar o actualizar en la base de datos
-    conn = sqlite3.connect("comunidad.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO usuarios (user_id, username, socio)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET socio=excluded.socio
-    """, (user_id, username, socio))
-    conn.commit()
-    conn.close()
+    # message.text puede ser None en teoría; lo protegemos
+    texto = message.text or ""
+    partes = texto.split(maxsplit=1)
+    socio = partes[1] if len(partes) > 1 else "ninguno"
 
-    # Mensaje de respuesta para el usuario
+    # Limitar longitud del socio para evitar abusos
+    socio = socio[:50]
+
+    # SQLite es bloqueante: lo sacamos del event loop
+    await asyncio.to_thread(guardar_usuario, user_id, username, socio)
+
     texto_bienvenida = (
-        f"¡Hola! Bienvenido a la comunidad.\n"
-        f"Tu registro ha sido vinculado correctamente.\n"
-        f"Socio asignado: <b>{socio}</b>"
+        "¡Hola! Bienvenido a la comunidad.\n"
+        "Tu registro ha sido vinculado correctamente.\n"
+        f"Socio asignado: <b>{html.escape(socio)}</b>"
     )
     await message.answer(texto_bienvenida, parse_mode="HTML")
 
-# 4. Comando de reporte rápido para verificar los socios (ej: /stats o /reporte)
+
 @dp.message(Command("reporte"))
-async def cmd_reporte(message: Message):
-    conn = sqlite3.connect("comunidad.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT socio, COUNT(*) FROM usuarios GROUP BY socio")
-    resultados = cursor.fetchall()
-    conn.close()
+async def cmd_reporte(message: Message) -> None:
+    resultados = await asyncio.to_thread(obtener_reporte)
 
     if not resultados:
         await message.answer("Aún no hay usuarios registrados en la base de datos.")
@@ -71,16 +87,19 @@ async def cmd_reporte(message: Message):
 
     reporte = "<b>📊 Reporte de Afiliados:</b>\n\n"
     for socio, total in resultados:
-        reporte += f"• Socio <code>{socio}</code>: {total} usuarios\n"
+        reporte += f"• Socio <code>{html.escape(socio)}</code>: {total} usuarios\n"
 
     await message.answer(reporte, parse_mode="HTML")
 
-# 5. Función principal de arranque
-async def main():
+
+async def main() -> None:
     init_db()
     print("Bot iniciado correctamente. Esperando mensajes...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
